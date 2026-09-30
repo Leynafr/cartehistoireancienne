@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cartes Interactives Géo & Histoire</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Connexion à Firebase (Base de données) -->
+    <script src="https://www.gstatic.com/firebasejs/10.5.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.5.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.5.0/firebase-firestore-compat.js"></script>
+
+    <style>
+        /* Police Times New Roman partout */
+        body, input, button, select, textarea { font-family: "Times New Roman", Times, serif !important; }
+        .shake { animation: shake 0.4s; }
+        @keyframes shake {
+            0%, 100% {transform: translate(-50%, -50%) translateX(0);}
+            25% {transform: translate(-50%, -50%) translateX(-5px);}
+            75% {transform: translate(-50%, -50%) translateX(5px);}
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        
+        /* ========================================================================= */
+        const firebaseConfig = {
+            apiKey: "AIzaSyD4mtj2HRLhg-YH4rBIDRWxCf4iZn8ST1I",
+            authDomain: "carte-interactive-geohist.firebaseapp.com",
+            projectId: "carte-interactive-geohist",
+            storageBucket: "carte-interactive-geohist.firebasestorage.app",
+            messagingSenderId: "754158704122",
+            appId: "1:754158704122:web:d93a09c78fbf2340154043",
+            measurementId: "G-6VS5SDPTBB"
+        };
+        /* ========================================================================= */
+
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        const { useState, useRef, useEffect } = React;
+
+        function App() {
+            // Utilisateur
+            const [user, setUser] = useState(null);
+            const [authMode, setAuthMode] = useState('login'); 
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const [pseudo, setPseudo] = useState('');
+
+            // Application
+            const [mode, setMode] = useState('gallery'); 
+            const [publicMaps, setPublicMaps] = useState([]);
+            const [savedMaps, setSavedMaps] = useState([]);
+            const [mapTitle, setMapTitle] = useState("Nouvelle carte");
+            const [image, setImage] = useState(null);
+            
+            // Éléments sur la carte
+            const [points, setPoints] = useState([]);
+            const [lines, setLines] = useState([]);
+            const [polygons, setPolygons] = useState([]);
+            
+            // Catégories & Palettes
+            const defaultCats = [
+                { id: 'cat1', name: 'Ville', color: '#3b82f6' },
+                { id: 'cat2', name: 'Bataille', color: '#ef4444' }
+            ];
+            const [categories, setCategories] = useState(defaultCats);
+            const [selectedCategoryId, setSelectedCategoryId] = useState('cat1');
+
+            const [savedPalettes, setSavedPalettes] = useState(() => {
+                const local = localStorage.getItem('geo_palettes');
+                return local ? JSON.parse(local) : [];
+            });
+
+            // Outils de dessin
+            const [activeTool, setActiveTool] = useState('pan'); // 'pan', 'marker', 'freehand', 'polygon'
+            const [currentLine, setCurrentLine] = useState(null);
+            const [currentPolygon, setCurrentPolygon] = useState(null);
+            
+            const [brushColor, setBrushColor] = useState('#f59e0b');
+            const [brushOpacity, setBrushOpacity] = useState(50);
+            const [brushSize, setBrushSize] = useState(2);
+            const [fillPattern, setFillPattern] = useState('solid');
+            const [borderTransparent, setBorderTransparent] = useState(false); // NOUVEAU
+            
+            // Navigation (Zoom & Pan)
+            const [zoom, setZoom] = useState(1);
+            const [pan, setPan] = useState({ x: 0, y: 0 });
+            const [isPanning, setIsPanning] = useState(false);
+            const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+
+            // Jeu
+            const [draggedPoint, setDraggedPoint] = useState(null);
+            const [solvedPoints, setSolvedPoints] = useState([]);
+            const [errorPoint, setErrorPoint] = useState(null);
+
+            const mapRef = useRef(null);
+            const historyRef = useRef([]);
+            const stateRef = useRef({ points, lines, polygons });
+
+            // --- Authentification & BDD ---
+            useEffect(() => {
+                const unsubscribe = auth.onAuthStateChanged((u) => {
+                    setUser(u);
+                    if (u) { loadPublicMaps(); loadMyMaps(u.uid); }
+                });
+                return () => unsubscribe();
+            }, []);
+
+            const handleAuth = async (e) => {
+                e.preventDefault();
+                try {
+                    if (authMode === 'register') {
+                        const userCredential = await auth.createUserWithEmailAndPassword(email, password);
+                        await userCredential.user.updateProfile({ displayName: pseudo });
+                        setUser({...userCredential.user, displayName: pseudo});
+                    } else {
+                        await auth.signInWithEmailAndPassword(email, password);
+                    }
+                } catch (error) {
+                    alert("Erreur de connexion : Vérifiez que l'email est valide et le mot de passe fait au moins 6 caractères.");
+                }
+            };
+            const logout = () => auth.signOut();
+
+            const loadPublicMaps = async () => {
+                const snapshot = await db.collection('maps').orderBy('createdAt', 'desc').get();
+                setPublicMaps(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            };
+
+            const loadMyMaps = async (userId) => {
+                const snapshot = await db.collection('maps').where('authorId', '==', userId).get();
+                setSavedMaps(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            };
+
+            const compressImage = (file, callback) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 1800; const MAX_HEIGHT = 1800;
+                        let width = img.width; let height = img.height;
+                        if (width > height) { if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; } } 
+                        else { if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; } }
+                        canvas.width = width; canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        callback(canvas.toDataURL('image/jpeg', 0.6));
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const handleImageUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) compressImage(file, setImage);
+            };
+
+            const saveMapToCloud = async () => {
+                if (!image) return alert("Veuillez charger une carte avant de sauvegarder.");
+                try {
+                    await db.collection('maps').add({
+                        title: mapTitle, image, points, lines, polygons, categories,
+                        authorId: user.uid,
+                        authorName: user.displayName || email.split('@')[0],
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    alert("✅ Carte publiée avec succès dans la galerie !");
+                    loadPublicMaps();
+                    loadMyMaps(user.uid);
+                    setMode('gallery');
+                } catch (e) { alert("❌ Erreur de sauvegarde."); }
+            };
+
+            const loadMapToPlay = (map) => {
+                setMapTitle(map.title); setImage(map.image); 
+                setPoints(map.points || []); setLines(map.lines || []); setPolygons(map.polygons || []);
+                setCategories(map.categories || defaultCats);
+                setZoom(1); setPan({x:0, y:0});
+                setSolvedPoints([]); setMode('play');
+            };
+
+            // --- Historique (Ctrl+Z) ---
+            useEffect(() => { stateRef.current = { points, lines, polygons }; }, [points, lines, polygons]);
+            const saveStateForUndo = () => {
+                historyRef.current.push({ points: [...stateRef.current.points], lines: [...stateRef.current.lines], polygons: [...stateRef.current.polygons] });
+                if (historyRef.current.length > 30) historyRef.current.shift();
+            };
+            const undo = () => {
+                if (activeTool === 'polygon' && currentPolygon && currentPolygon.length > 0) {
+                    setCurrentPolygon(currentPolygon.slice(0, -1)); return;
+                }
+                if (historyRef.current.length > 0) {
+                    const previousState = historyRef.current.pop();
+                    setPoints(previousState.points); setLines(previousState.lines); setPolygons(previousState.polygons);
+                }
+            };
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if (mode === 'create' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                        if (e.target.tagName === 'INPUT') return;
+                        e.preventDefault(); undo();
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [mode, activeTool, currentPolygon]);
+
+            // --- INTERACTIONS SOURIS (Navigation & Dessin) ---
+            const handleMouseDown = (e) => {
+                if (mode === 'play' || activeTool === 'pan') {
+                    setIsPanning(true);
+                    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+                } else if (activeTool === 'freehand') {
+                    const rect = mapRef.current.getBoundingClientRect();
+                    const x = ((e.clientX - rect.left) / rect.width) * 100;
+                    const y = ((e.clientY - rect.top) / rect.height) * 100;
+                    setCurrentLine({ points: [{x, y}], color: brushColor, opacity: brushOpacity, size: brushSize });
+                }
+            };
+
+            const handleMouseMove = (e) => {
+                if (isPanning) {
+                    setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+                } else if (activeTool === 'freehand' && currentLine) {
+                    const rect = mapRef.current.getBoundingClientRect();
+                    const x = ((e.clientX - rect.left) / rect.width) * 100;
+                    const y = ((e.clientY - rect.top) / rect.height) * 100;
+                    setCurrentLine({ ...currentLine, points: [...currentLine.points, {x, y}] });
+                }
+            };
+
+            const handleMouseUp = () => {
+                if (isPanning) setIsPanning(false);
+                else if (activeTool === 'freehand' && currentLine) {
+                    saveStateForUndo(); setLines([...lines, currentLine]); setCurrentLine(null);
+                }
+            };
+
+            const handleMapClick = (e) => {
+                if (mode !== 'create' || activeTool === 'pan' || activeTool === 'freehand') return;
+                
+                const rect = mapRef.current.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 100;
+                const y = ((e.clientY - rect.top) / rect.height) * 100;
+                
+                if (activeTool === 'marker') {
+                    const name = prompt("Quel est le nom de ce lieu / événement ?");
+                    if (name) {
+                        saveStateForUndo();
+                        setPoints([...points, { id: Date.now(), name, x, y, categoryId: selectedCategoryId }]);
+                    }
+                } else if (activeTool === 'polygon') {
+                    setCurrentPolygon([...(currentPolygon || []), {x, y}]);
+                }
+            };
+
+            const closePolygon = () => {
+                if (currentPolygon && currentPolygon.length > 2) {
+                    saveStateForUndo();
+                    setPolygons([...polygons, { id: Date.now(), points: currentPolygon, color: brushColor, opacity: brushOpacity, pattern: fillPattern, borderTransparent }]);
+                    setCurrentPolygon(null);
+                } else alert("Une zone doit contenir au moins 3 points.");
+            };
+
+            // Palettes
+            const saveCurrentPalette = () => {
+                const name = prompt("Donnez un nom à cette légende :");
+                if (name) {
+                    const newPalettes = [...savedPalettes, { id: Date.now(), name, categories }];
+                    setSavedPalettes(newPalettes);
+                    localStorage.setItem('geo_palettes', JSON.stringify(newPalettes));
+                }
+            };
+
+            // Jeu
+            const handleDrop = (e, targetPoint) => {
+                e.preventDefault();
+                if (draggedPoint.id === targetPoint.id) setSolvedPoints([...solvedPoints, targetPoint.id]);
+                else { setErrorPoint(targetPoint.id); setTimeout(() => setErrorPoint(null), 500); }
+            };
+
+            // Curseur dynamique
+            let mapCursor = 'default';
+            if (activeTool === 'pan' || mode === 'play') mapCursor = isPanning ? 'grabbing' : 'grab';
+            else if (mode === 'create' && (activeTool === 'freehand' || activeTool === 'polygon' || activeTool === 'marker')) mapCursor = 'crosshair';
+
+            // --- RENDU ---
+            if (!user) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+                        <div className="bg-white p-8 rounded-xl shadow-lg max-w-md w-full border-t-8 border-blue-600">
+                            <h1 className="text-3xl font-bold text-center mb-6">🌍 Le Coin Géo</h1>
+                            <form onSubmit={handleAuth} className="flex flex-col gap-4">
+                                {authMode === 'register' && <input type="text" placeholder="Votre Pseudo" required value={pseudo} onChange={e => setPseudo(e.target.value)} className="border-2 p-3 rounded font-bold" />}
+                                <input type="email" placeholder="Email" required value={email} onChange={e => setEmail(e.target.value)} className="border-2 p-3 rounded" />
+                                <input type="password" placeholder="Mot de passe (6 car. min)" required value={password} onChange={e => setPassword(e.target.value)} className="border-2 p-3 rounded" />
+                                <button type="submit" className="bg-blue-600 text-white p-3 rounded font-bold hover:bg-blue-700 text-lg shadow">{authMode === 'login' ? 'Se connecter' : "Créer mon compte"}</button>
+                            </form>
+                            <div className="text-center mt-6 p-4 bg-gray-50 rounded">
+                                <p className="text-sm font-bold text-gray-600 mb-2">{authMode === 'login' ? "Nouveau dans la classe ?" : "Vous avez déjà un compte ?"}</p>
+                                <button onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')} className="text-blue-600 font-bold border-2 border-blue-600 px-4 py-1 rounded hover:bg-blue-50">{authMode === 'login' ? "S'inscrire ici" : 'Se connecter'}</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="max-w-7xl mx-auto p-4 flex flex-col h-screen">
+                    <div className="bg-white p-4 rounded-xl shadow flex flex-wrap justify-between items-center mb-4 gap-4 border-l-8 border-blue-600 shrink-0">
+                        <h1 className="text-2xl font-bold text-slate-700">🌍 Bienvenue, {user.displayName || 'Élève'}</h1>
+                        <div className="flex gap-2">
+                            <button onClick={() => setMode('gallery')} className={`px-4 py-2 rounded-lg font-bold border ${mode === 'gallery' ? 'bg-purple-600 text-white shadow' : 'bg-gray-100 hover:bg-gray-200'}`}>🌐 Cartes classe</button>
+                            <button onClick={() => setMode('library')} className={`px-4 py-2 rounded-lg font-bold border ${mode === 'library' ? 'bg-indigo-600 text-white shadow' : 'bg-gray-100 hover:bg-gray-200'}`}>📁 Mes Créations</button>
+                            <button onClick={() => { setMapTitle("Nouvelle Carte"); setImage(null); setPoints([]); setLines([]); setPolygons([]); setMode('create'); setActiveTool('pan'); setZoom(1); setPan({x:0, y:0}); }} className={`px-4 py-2 rounded-lg font-bold border ${mode === 'create' ? 'bg-blue-600 text-white shadow' : 'bg-gray-100 hover:bg-gray-200'}`}>🛠 Créer carte</button>
+                            <button onClick={logout} className="px-4 py-2 rounded-lg font-bold border bg-red-100 text-red-600 hover:bg-red-200 ml-4">Quitter</button>
+                        </div>
+                    </div>
+
+                    {(mode === 'gallery' || mode === 'library') && (
+                        <div className="flex-1 bg-white p-8 rounded-xl shadow overflow-y-auto">
+                            <div className="flex justify-between items-center mb-6 border-b pb-4">
+                                <h2 className="text-2xl font-bold">{mode === 'gallery' ? "🌐 Jouez aux cartes de vos camarades" : "📁 Vos propres créations (Publiées)"}</h2>
+                                <button onClick={() => loadPublicMaps()} className="bg-gray-200 px-3 py-1 rounded font-bold">🔄 Actualiser</button>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {(mode === 'gallery' ? publicMaps : savedMaps).map(map => (
+                                    <div key={map.id} className="border-2 rounded-xl overflow-hidden shadow-sm hover:shadow-lg transition bg-gray-50 flex flex-col">
+                                        <div className="h-48 bg-gray-200 flex items-center justify-center overflow-hidden">
+                                            {map.image ? <img src={map.image} className="object-cover w-full h-full opacity-90 hover:opacity-100 transition" /> : 'Pas d\'image'}
+                                        </div>
+                                        <div className="p-4 flex-1 flex flex-col">
+                                            <h3 className="font-bold text-xl mb-1">{map.title}</h3>
+                                            <p className="text-sm text-gray-500 mb-4 bg-gray-100 p-2 rounded">
+                                                Créateur : <span className="font-bold text-purple-600">{map.authorName}</span><br/>
+                                                Éléments à placer : <span className="font-bold">{(map.points||[]).length}</span>
+                                            </p>
+                                            <button onClick={() => loadMapToPlay(map)} className="mt-auto w-full bg-green-600 text-white px-3 py-3 rounded font-bold hover:bg-green-700 shadow flex items-center justify-center gap-2">
+                                                <span className="text-xl">▶️</span> Lancer le jeu !
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {(mode === 'create' || mode === 'play') && (
+                        <div className="flex gap-4 flex-1 overflow-hidden">
+                            
+                            {/* --- PANNEAU DE GAUCHE --- */}
+                            <div className="w-80 bg-white p-4 rounded-xl shadow flex flex-col gap-4 overflow-y-auto shrink-0 relative z-20">
+                                <div className="border-b pb-4">
+                                    <h3 className="text-xs text-gray-500 font-bold uppercase mb-1">Nom de votre carte</h3>
+                                    <input type="text" value={mapTitle} onChange={(e) => setMapTitle(e.target.value)} disabled={mode !== 'create'} className="w-full font-bold text-xl border-2 p-2 rounded bg-gray-50 focus:border-blue-500 outline-none" />
+                                </div>
+
+                                {mode === 'create' ? (
+                                    <>
+                                        <div className="border-b pb-4">
+                                            <h3 className="font-bold mb-2">1. Image de fond (Carte)</h3>
+                                            <input type="file" accept="image/*" onChange={handleImageUpload} className="text-sm w-full font-bold" />
+                                        </div>
+                                        
+                                        <div className="border-b pb-4">
+                                            <h3 className="font-bold mb-2">2. Étiquettes / Légendes</h3>
+                                            {categories.map(cat => (
+                                                <div key={cat.id} className="flex items-center gap-1 mb-2">
+                                                    <input type="color" value={cat.color} onChange={(e) => setCategories(categories.map(c => c.id === cat.id ? { ...c, color: e.target.value } : c))} className="w-8 h-8 rounded cursor-pointer shrink-0" title="Choisir à la souris" />
+                                                    <input type="text" value={cat.name} onChange={(e) => setCategories(categories.map(c => c.id === cat.id ? { ...c, name: e.target.value } : c))} className="border rounded px-2 py-1 text-sm flex-1 font-bold" placeholder="Nom" />
+                                                    <button onClick={() => categories.length > 1 && setCategories(categories.filter(c => c.id !== cat.id))} className="text-red-500 font-bold px-1 hover:bg-red-50 rounded">X</button>
+                                                </div>
+                                            ))}
+                                            <button onClick={() => setCategories([...categories, { id: 'cat' + Date.now(), name: 'Nouvelle Catégorie', color: '#10b981' }])} className="text-sm bg-slate-100 font-bold px-2 py-2 rounded w-full border mt-1 hover:bg-slate-200">+ Ajouter catégorie</button>
+                                            
+                                            <div className="mt-3 p-3 bg-indigo-50 border border-indigo-200 rounded">
+                                                <div className="flex justify-between items-center mb-2">
+                                                    <span className="text-xs font-bold text-indigo-800">💾 Palettes Sauvegardées</span>
+                                                    <button onClick={saveCurrentPalette} className="text-xs bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700 font-sans">Sauver l'actuelle</button>
+                                                </div>
+                                                {savedPalettes.length > 0 && (
+                                                    <select onChange={(e) => {
+                                                        const p = savedPalettes.find(x => x.id.toString() === e.target.value);
+                                                        if(p) { setCategories(p.categories); setSelectedCategoryId(p.categories[0]?.id); }
+                                                        e.target.value = "";
+                                                    }} className="w-full text-sm p-1 rounded border outline-none font-bold text-indigo-900 bg-white cursor-pointer">
+                                                        <option value="">📂 Charger une légende...</option>
+                                                        {savedPalettes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                                    </select>
+                                                )}
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="border-b pb-4">
+                                            <h3 className="font-bold mb-2">3. Outils de carte</h3>
+                                            
+                                            <div className="flex gap-1 mb-3 bg-gray-200 p-1 rounded-lg flex-wrap">
+                                                <button onClick={() => {setActiveTool('pan'); setCurrentPolygon(null);}} className={`flex-1 py-1.5 rounded text-sm font-bold transition shadow-sm ${activeTool === 'pan' ? 'bg-white text-blue-600' : 'text-gray-600 hover:bg-gray-300'}`}>🖐️️ Naviguer</button>
+                                                <button onClick={() => {setActiveTool('marker'); setCurrentPolygon(null);}} className={`flex-1 py-1.5 rounded text-sm font-bold transition shadow-sm ${activeTool === 'marker' ? 'bg-white text-blue-600' : 'text-gray-600 hover:bg-gray-300'}`}>📍 Point</button>
+                                                <button onClick={() => {setActiveTool('freehand'); setCurrentPolygon(null);}} className={`flex-1 py-1.5 rounded text-sm font-bold transition shadow-sm ${activeTool === 'freehand' ? 'bg-white text-blue-600' : 'text-gray-600 hover:bg-gray-300'}`}>✏️ Ligne</button>
+                                                <button onClick={() => {setActiveTool('polygon');}} className={`flex-1 py-1.5 rounded text-sm font-bold transition shadow-sm ${activeTool === 'polygon' ? 'bg-white text-blue-600' : 'text-gray-600 hover:bg-gray-300'}`}>⬟ Zone</button>
+                                            </div>
+
+                                            {activeTool === 'pan' && (
+                                                <div className="p-3 bg-gray-50 rounded border text-sm">
+                                                    <span className="font-bold block mb-1">Outil Navigation</span>
+                                                    <p className="text-gray-600 italic text-xs">Cliquez et glissez sur la carte pour vous déplacer. Utilisez les boutons +/- pour zoomer.</p>
+                                                </div>
+                                            )}
+
+                                            {activeTool === 'marker' && (
+                                                <div className="p-3 bg-blue-50 rounded border border-blue-200 text-sm">
+                                                    <span className="font-bold text-blue-800 block mb-1">Outil Marqueur (Étiquettes)</span>
+                                                    <p className="text-gray-600 italic text-xs mb-2">Cliquez pour placer un point d'intérêt.</p>
+                                                    <span className="text-xs font-bold">Catégorie :</span>
+                                                    <select value={selectedCategoryId} onChange={e => setSelectedCategoryId(e.target.value)} className="w-full mt-1 p-1 rounded font-bold outline-none" style={{ color: categories.find(c => c.id === selectedCategoryId)?.color }}>
+                                                        {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                                    </select>
+                                                </div>
+                                            )}
+
+                                            {activeTool === 'freehand' && (
+                                                <div className="flex flex-col gap-2 p-3 bg-gray-50 rounded border">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="text-sm font-bold">Outil Crayon libre</span>
+                                                        <button onClick={() => {saveStateForUndo(); setLines([]);}} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200 font-bold">Effacer tout</button>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <input type="color" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} className="w-10 h-10 rounded cursor-pointer" />
+                                                        <input type="text" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} className="w-full border rounded px-2 py-2 text-sm font-bold uppercase" placeholder="#HEX" />
+                                                    </div>
+                                                    <span className="text-xs font-bold">Opacité</span><input type="range" min="10" max="100" value={brushOpacity} onChange={(e) => setBrushOpacity(e.target.value)} />
+                                                    <span className="text-xs font-bold">Épaisseur</span><input type="range" min="0.5" max="10" step="0.5" value={brushSize} onChange={(e) => setBrushSize(e.target.value)} />
+                                                </div>
+                                            )}
+
+                                            {activeTool === 'polygon' && (
+                                                <div className="flex flex-col gap-2 p-3 bg-green-50 rounded border border-green-200">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="text-sm font-bold text-green-800">Outil Zone & Motifs</span>
+                                                        <button onClick={() => {saveStateForUndo(); setPolygons([]); setCurrentPolygon(null);}} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200 font-bold">Effacer tout</button>
+                                                    </div>
+                                                    <p className="text-xs text-gray-600 italic mb-2">Placez les sommets point par point.</p>
+                                                    
+                                                    <div className="flex items-center gap-2">
+                                                        <input type="color" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} className="w-10 h-10 rounded cursor-pointer" />
+                                                        <input type="text" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} className="w-full border rounded px-2 py-2 text-sm font-bold uppercase" placeholder="#HEX" />
+                                                    </div>
+                                                    
+                                                    <span className="text-xs font-bold mt-1">Motif :</span>
+                                                    <select value={fillPattern} onChange={(e) => setFillPattern(e.target.value)} className="w-full p-1 border rounded text-sm font-bold outline-none">
+                                                        <option value="solid">Uni transparent</option>
+                                                        <option value="striped">Rayures</option>
+                                                        <option value="checkered">Quadrillage</option>
+                                                        <option value="dots">Pointillés</option>
+                                                    </select>
+
+                                                    <span className="text-xs font-bold mt-1">Opacité globale</span>
+                                                    <input type="range" min="10" max="100" value={brushOpacity} onChange={(e) => setBrushOpacity(e.target.value)} />
+
+                                                    <label className="flex items-center gap-2 mt-2 text-xs font-bold cursor-pointer bg-white p-2 rounded border">
+                                                        <input type="checkbox" checked={borderTransparent} onChange={(e) => setBorderTransparent(e.target.checked)} className="w-4 h-4 cursor-pointer" />
+                                                        Bordures invisibles
+                                                    </label>
+
+                                                    {currentPolygon && currentPolygon.length > 0 && (
+                                                        <div className="flex gap-2 mt-2">
+                                                            <button onClick={closePolygon} className="flex-1 bg-green-600 text-white px-2 py-2 rounded font-bold text-sm hover:bg-green-700 shadow border-2 border-green-800">✅ Terminer zone</button>
+                                                            <button onClick={() => setCurrentPolygon(null)} className="bg-red-100 text-red-600 px-3 py-2 rounded font-bold text-sm hover:bg-red-200">X</button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <button onClick={saveMapToCloud} className="w-full bg-blue-600 text-white font-bold px-2 py-3 rounded-xl hover:bg-blue-700 shadow-lg text-lg transform hover:scale-105 transition">🚀 Publier dans la Galerie</button>
+                                        
+                                        <div className="mt-4">
+                                            <h3 className="font-bold mb-2 text-gray-500">Points à deviner ({points.length})</h3>
+                                            {points.map(p => (
+                                                <div key={p.id} className="flex justify-between items-center text-sm bg-white border p-2 rounded mb-2 border-l-8 shadow-sm" style={{borderLeftColor: (categories.find(c=>c.id===p.categoryId)||{}).color}}>
+                                                    <span className="font-bold">{p.name}</span>
+                                                    <button onClick={() => {saveStateForUndo(); setPoints(points.filter(pt => pt.id !== p.id))}} className="text-red-500 font-bold px-2 bg-red-50 hover:bg-red-100 rounded">X</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="flex justify-between items-center mb-4 bg-gray-100 p-2 rounded">
+                                            <h3 className="font-bold text-lg">À vous de jouer !</h3>
+                                            <button onClick={() => setSolvedPoints([])} className="text-sm font-bold bg-red-100 text-red-600 px-3 py-1 rounded border border-red-200">Recommencer</button>
+                                        </div>
+                                        <p className="text-sm mb-4 text-gray-600 italic">Glissez les étiquettes sur les marqueurs. Cliquez sur la carte pour la déplacer.</p>
+                                        <div className="flex flex-col gap-3">
+                                            {points.filter(p => !solvedPoints.includes(p.id)).map(p => {
+                                                const cat = categories.find(c => c.id === p.categoryId) || categories[0];
+                                                return (
+                                                    <div key={p.id} draggable onDragStart={() => setDraggedPoint(p)} className="border-2 bg-white p-3 rounded-lg cursor-grab text-center font-bold text-lg shadow hover:shadow-md transition relative z-30" style={{ borderColor: cat?.color, color: cat?.color }}>
+                                                        {p.name}
+                                                    </div>
+                                                );
+                                            })}
+                                            {points.length > 0 && solvedPoints.length === points.length && (
+                                                <div className="bg-green-100 text-green-700 p-6 rounded-xl text-center font-bold text-2xl border-2 border-green-300 shake shadow-lg">🎉 VICTOIRE ! 🎉</div>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+
+                            {/* --- ZONE DE LA CARTE --- */}
+                            <div 
+                                className="flex-1 bg-gray-200 rounded-xl border-4 border-dashed border-gray-300 overflow-hidden relative flex items-center justify-center"
+                                onMouseDown={handleMouseDown}
+                                onMouseMove={handleMouseMove}
+                                onMouseUp={handleMouseUp}
+                                onMouseLeave={handleMouseUp}
+                                onWheel={(e) => {
+                                    if(e.deltaY < 0) setZoom(z => Math.min(z + 0.3, 5));
+                                    else setZoom(z => Math.max(z - 0.3, 0.5));
+                                }}
+                            >
+                                {/* Contrôles de ZOOM flottants */}
+                                {image && (
+                                    <div className="absolute top-4 right-4 z-30 flex flex-col gap-2">
+                                        <button onClick={() => setZoom(z => Math.min(z + 0.5, 5))} className="w-10 h-10 bg-white/90 rounded-lg shadow-lg border-2 border-gray-300 text-2xl font-bold hover:bg-gray-50">+</button>
+                                        <button onClick={() => setZoom(z => Math.max(z - 0.5, 0.5))} className="w-10 h-10 bg-white/90 rounded-lg shadow-lg border-2 border-gray-300 text-2xl font-bold hover:bg-gray-50">-</button>
+                                        <button onClick={() => {setZoom(1); setPan({x:0, y:0})}} className="px-2 py-2 bg-white/90 rounded-lg shadow-lg border-2 border-gray-300 text-xs font-bold hover:bg-gray-50">Centrer</button>
+                                    </div>
+                                )}
+
+                                {!image ? <p className="text-gray-500 font-bold text-xl text-center p-8">Chargez une image à gauche pour commencer à créer votre carte !</p> : (
+                                    <div 
+                                        className="relative inline-block max-w-full max-h-full shadow-2xl" 
+                                        ref={mapRef} 
+                                        onClick={handleMapClick} 
+                                        style={{ 
+                                            cursor: mapCursor,
+                                            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                                            transformOrigin: 'center center',
+                                            transition: isPanning ? 'none' : 'transform 0.1s ease-out'
+                                        }}
+                                    >
+                                        <img src={image} className="block max-w-full max-h-full pointer-events-none" draggable="false" />
+                                        
+                                        {/* CALQUE SVG : DESSINS ET ZONES */}
+                                        <svg className="absolute top-0 left-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                                            <defs>
+                                                {[...polygons, { id: 'current', color: brushColor, pattern: fillPattern }].map((poly) => {
+                                                    if (!poly || poly.pattern === 'solid') return null;
+                                                    return (
+                                                        <React.Fragment key={`def-${poly.id}`}>
+                                                            {poly.pattern === 'striped' && (
+                                                                <pattern id={`pat-striped-${poly.id}`} width="2" height="2" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                                                                    <line x1="0" y1="0" x2="0" y2="2" stroke={poly.color} strokeWidth="1" />
+                                                                </pattern>
+                                                            )}
+                                                            {poly.pattern === 'checkered' && (
+                                                                <pattern id={`pat-checkered-${poly.id}`} width="2" height="2" patternUnits="userSpaceOnUse">
+                                                                    <rect x="0" y="0" width="1" height="1" fill={poly.color} />
+                                                                    <rect x="1" y="1" width="1" height="1" fill={poly.color} />
+                                                                </pattern>
+                                                            )}
+                                                            {poly.pattern === 'dots' && (
+                                                                <pattern id={`pat-dots-${poly.id}`} width="2" height="2" patternUnits="userSpaceOnUse">
+                                                                    <circle cx="0.5" cy="0.5" r="0.4" fill={poly.color} />
+                                                                </pattern>
+                                                            )}
+                                                        </React.Fragment>
+                                                    );
+                                                })}
+                                            </defs>
+
+                                            {/* ZONES CRÉÉES */}
+                                            {polygons.map((poly) => (
+                                                <polygon 
+                                                    key={poly.id}
+                                                    points={poly.points.map(p => `${p.x},${p.y}`).join(' ')}
+                                                    fill={poly.pattern === 'solid' ? poly.color : `url(#pat-${poly.pattern}-${poly.id})`}
+                                                    fillOpacity={poly.opacity / 100}
+                                                    stroke={poly.borderTransparent ? 'transparent' : poly.color}
+                                                    strokeWidth="0.5"
+                                                />
+                                            ))}
+
+                                            {/* ZONE EN COURS */}
+                                            {currentPolygon && currentPolygon.length > 0 && (
+                                                <>
+                                                    <polygon 
+                                                        points={currentPolygon.map(p => `${p.x},${p.y}`).join(' ')}
+                                                        fill={fillPattern === 'solid' ? brushColor : `url(#pat-${fillPattern}-current)`}
+                                                        fillOpacity={brushOpacity / 100}
+                                                        stroke={borderTransparent ? 'rgba(0,0,0,0.3)' : brushColor}
+                                                        strokeWidth="0.5"
+                                                        strokeDasharray="1"
+                                                    />
+                                                    {currentPolygon.map((p, i) => (
+                                                        <circle key={`vertex-${i}`} cx={p.x} cy={p.y} r="0.6" fill="white" stroke={brushColor} strokeWidth="0.2" />
+                                                    ))}
+                                                </>
+                                            )}
+
+                                            {/* LIGNES CRAYON */}
+                                            {[...lines, currentLine].filter(Boolean).map((line, i) => (
+                                                <polyline key={i} points={line.points.map(p => `${p.x} ${p.y}`).join(',')} fill="none" stroke={line.color} strokeWidth={line.size||2} strokeLinecap="round" strokeLinejoin="round" opacity={line.opacity/100} />
+                                            ))}
+                                        </svg>
+
+                                        {/* MARQUEURS */}
+                                        {points.map(p => {
+                                            const isSolved = solvedPoints.includes(p.id);
+                                            const isError = errorPoint === p.id;
+                                            const cat = categories.find(c => c.id === p.categoryId) || categories[0];
+                                            return (
+                                                <div key={p.id} className={`absolute w-6 h-6 rounded-full border-2 transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center shadow-lg transition-all ${isSolved ? 'bg-green-500 border-white scale-110' : ''} ${isError ? 'bg-red-500 border-red-200 shake scale-110' : ''}`}
+                                                    style={{ left: `${p.x}%`, top: `${p.y}%`, backgroundColor: !isSolved && !isError ? cat?.color : undefined, borderColor: !isSolved && !isError ? 'white' : undefined, zIndex: 10 }}
+                                                    onDragOver={e => e.preventDefault()} onDrop={e => handleDrop(e, p)}>
+                                                    {(mode === 'create' || isSolved) && <span className="absolute top-7 text-xs px-2 py-1 rounded shadow-lg whitespace-nowrap font-bold text-white border pointer-events-none" style={{ backgroundColor: isSolved ? '#22c55e' : cat?.color, borderColor: isSolved ? '#16a34a' : 'rgba(0,0,0,0.1)' }}>{p.name}</span>}
+                                                    {!isSolved && mode === 'play' && <div className="w-2 h-2 bg-white rounded-full opacity-60 pointer-events-none"></div>}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
